@@ -17,6 +17,7 @@
 #include "readnwrite.h"
 #include "aesenc.h"
 #include "msg.h"
+#include "ecdh.h"
 
 #define BUF_SIZE 128
 #define IDPW_SIZE 16
@@ -61,8 +62,16 @@ int main(int argc, char* argv[])
     unsigned char hash1[32] = {0, };
     unsigned char hash2[32] = {0, };
 
-    BIO *rpub = NULL;
-    RSA *rsa_pubkey = NULL;
+    //ECDH
+    BIO* bp_clntPublicKey = NULL;
+    BIO* bp_servPublicKey = NULL;
+    EVP_PKEY *ecdh_clntPrivateKey = generateKey();
+    EVP_PKEY *ecdh_clntPublicKey = extractPublicKey(ecdh_clntPrivateKey);
+    EVP_PKEY *ecdh_servPublicKey = NULL;
+    derivedKey* clientSecret = NULL;
+    unsigned char clientSecretKey[16];  // session key
+    int clntPublicKey_len;
+
     char down_dir[40] = "./clntsavedata/";
     int down_dir_len = strlen(down_dir);
     int len = 0;
@@ -78,8 +87,6 @@ int main(int argc, char* argv[])
         exit(1);
     }
 
-    RAND_poll();
-    RAND_bytes(key, sizeof(key)); // 난수 생성, 랜덤한 세션 키 생성
     
     for (cnt_i = 0; cnt_i < AES_KEY_128; cnt_i++)
     {
@@ -109,72 +116,71 @@ int main(int argc, char* argv[])
 
     // setup process
     // sending PUBLIC_KEY_REQUEST msg
-    // 서버로 공개키 요청 메시지 전송
-    memset(&msg_out, 0, sizeof(msg_out)); // 0 초기화
-    msg_out.type = PUBLIC_KEY_REQUEST; // 타입 설정
+    // 서버로 공개키 요청 메시지 전송 + 클라이언트의 공개키 전송
+    // set-up process for send public key to server and request server's public key
+    // sending PUBLIC_KEY_REQUEST msg with client public key
+    memset(&msg_out, 0, sizeof(msg_out));
+    msg_out.type = PUBLIC_KEY_REQUEST;
     msg_out.type = htonl(msg_out.type);
 
-    n = writen(sock, &msg_out, sizeof(APP_MSG)); // 소켓으로 전달 
-    if (n == -1)
-    {
-        error_handling("writen() error");
+    bp_clntPublicKey = BIO_new(BIO_s_mem());
+    if (!bp_clntPublicKey) {
+        error_handling("BIO_new(BIO_s_mem()) error");
     }
 
-    //서버로부터의 공개키 메시지 수신
-    //receiving PUBLIC_KEY msg
-    memset(&msg_in, 0, sizeof(APP_MSG)); 
+    if (PEM_write_bio_PUBKEY(bp_clntPublicKey, ecdh_clntPublicKey) != 1) {
+        error_handling("ECDH PEM_write_bio_PUBKEY() error");
+        BIO_free(bp_clntPublicKey);
+        // abort();
+    }
+    clntPublicKey_len = BIO_pending(bp_clntPublicKey);
+
+    BIO_read(bp_clntPublicKey, msg_out.payload, clntPublicKey_len);
+    msg_out.msg_len = ntohl(clntPublicKey_len);
+    n = writen(sock, &msg_out, sizeof(APP_MSG)); 
+    if (n == -1) {
+        error_handling("writen() error");
+    }
+    
+    // set-up process for receive server public key
+    memset(&msg_in, 0, sizeof(msg_in)); 
     n = readn(sock, &msg_in, sizeof(APP_MSG)); 
     msg_in.type = ntohl(msg_in.type); 
     msg_in.msg_len = ntohl(msg_in.msg_len); 
-
-    if (n == -1)
-    {
+if (n == -1) {
         error_handling("readn() error");
     }
-    else if (n == 0)
-    {
+    else if (n == 0) {
         error_handling("reading EOF");
     }
 
-    if (msg_in.type != PUBLIC_KEY)
-    {
-        error_handling("message error");
+    if (msg_in.type != PUBLIC_KEY) {
+        error_handling("server first message must be PULBIC_KEY");
     }
-    else
-    {
-        // 공개키 받았으므로
-        // 서버로부터의 공개키 메시지를 RSA 타입으로 변환
-        rpub = BIO_new_mem_buf(msg_in.payload, -1);
-        BIO_write(rpub, msg_in.payload, msg_in.msg_len);
-        if (!PEM_read_bio_RSAPublicKey(rpub, &rsa_pubkey, NULL, NULL)) // 공개키 뽑아오기 // rpub에 들어있는 데이터를 rsa_pubkey로 전송
-        {
-            error_handling("PEM_read_bio_RSAPublicKey() error");
+    else {
+        printf("send server public key\n");
+        // read server's public key
+        bp_servPublicKey = BIO_new_mem_buf(msg_in.payload, msg_in.msg_len);
+        if (!bp_servPublicKey) {
+            error_handling("BIO_new_mem_buf() error");
         }
-    }
-    
-    //sending ENCRYPTED_KEY msg
-    //클라이언트는 랜덤하게 생성한 키를 서버의 공개키로 암호화하여 서버로 전송
-    memset(&msg_out, 0, sizeof(APP_MSG));
-    msg_out.type = ENCRYPTED_KEY;
-    msg_out.type = htonl(msg_out.type);
-    // 공개키를 사용해 세션키를 암호화한 후 payload 에 저장해서 보낸다.
-    msg_out.msg_len = RSA_public_encrypt(sizeof(key), key, msg_out.payload, rsa_pubkey, RSA_PKCS1_OAEP_PADDING);
-    msg_out.msg_len = htonl(msg_out.msg_len);
 
-    n = writen(sock, &msg_out, sizeof(APP_MSG));
+        ecdh_servPublicKey = PEM_read_bio_PUBKEY(bp_servPublicKey, NULL, NULL, NULL);
+        if (!ecdh_servPublicKey) {
+            error_handling("PEM_read_bio_PUBKEY() error");
+            BIO_free(bp_servPublicKey);
+        }
 
-    if (n == -1)
-    {
-        error_handling("writen() error");
-    }
+        //! debug
+        clientSecret = deriveShared(ecdh_servPublicKey, ecdh_clntPrivateKey);
+        // ECDH shared key
+        memcpy(clientSecretKey, clientSecret->secret, 16);
 
-    // 서버와 클라이언트의 키가 제대로 전송되어 같은지 확인용
-    printf("session key = ");
-    for (int i = 0; i < AES_KEY_128; i++)
-    {
-        printf("%02X ", key[i]);
-    }
-    printf("\n");
+        for (int cnt = 0; cnt < 16; cnt++) {
+            printf("%02X ", clientSecretKey[cnt]);
+            key[cnt] = clientSecretKey[cnt];
+    } printf("\n");
+}
 
     //Login process
     // ID/PW 입력 예시

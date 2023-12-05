@@ -23,16 +23,15 @@
 #include "readnwrite.h"
 #include "aesenc.h"
 #include "msg.h"
+#include "ecdh.h"
 
 
 #define BUF_SIZE 128
 #define IDPW_SIZE 32
 
 void error_handling(char *msg);
-int rsaes_generator();
 int check_user(char *id, char *pw);
 void enrollment_user(char *id, char *pw);
-static int _pad_unknopwn(void);
 
 void error_handling(char *msg)
 {
@@ -45,7 +44,7 @@ void read_childproc(int sig); // 운영체제가 직접적으로 자식프로세
 
 #define BUF_SIZE 128
 
-// 서버 실행 파일 생성 명령어 : gcc aesenc.c readnwrite.c serv.c -o serv -lcrypto
+// 서버 실행 파일 생성 명령어 : gcc ecdh.c aesenc.c readnwrite.c serv.c -o serv -lcrypto
 // -o serv : 생성할 실행파일의 이름
 // -lcrypto : OpenSSL 사용을 위한 명령어
 
@@ -56,43 +55,65 @@ int main(int argc, char* argv[])
 {
     int serv_sock; // listening socket
     int clnt_sock; // accept 으로 받는 파일 디스크립트
-    char message[BUF_SIZE+1];
+    char message[BUF_SIZE + 1];
     int str_len, cnt_i;
     int msg_type;
     struct sockaddr_in serv_addr; // 바인드함수용
     struct sockaddr_in clnt_addr; // 클라이언트 주소정보 저장
     socklen_t clnt_addr_size;
-    char recv_id[IDPW_SIZE] = {0, };
-    char recv_pw[IDPW_SIZE] = {0, };
-    char file_name[BUF_SIZE] = {0, };
+    char recv_id[IDPW_SIZE] = { 0, };
+    char recv_pw[IDPW_SIZE] = { 0, };
+    char file_name[BUF_SIZE] = { 0, };
     APP_MSG id;
     APP_MSG pw;
     APP_MSG msg_in;
     APP_MSG msg_out;
 
-    char plaintext[BUFSIZE + AES_BLOCK_SIZE] = {0, };
+    char plaintext[BUFSIZE + AES_BLOCK_SIZE] = { 0, };
     int n;
     int len;
     int plaintext_len;
     int ciphertext_len;
     int publickey_len;
     int encryptedkey_len;
-    
+
     char down_dir[40] = "./serversavedata/";
     int down_dir_len = strlen(down_dir);
 
-    unsigned char key[AES_KEY_128] = {0, };
-    unsigned char iv[AES_KEY_128] = {0, };
-    unsigned char buffer[BUFSIZE] = {0, };
-    unsigned char hash1[32] = {0, };
-    unsigned char hash2[32] = {0, };
+    unsigned char key[AES_KEY_128] = { 0, };
+    unsigned char iv[AES_KEY_128] = { 0, };
+    unsigned char buffer[BUFSIZE] = { 0, };
+    unsigned char hash1[32] = { 0, };
+    unsigned char hash2[32] = { 0, };
 
-    unsigned char id_hash[32] = {0, };
-    unsigned char pw_hash[32] = {0, };
+    unsigned char id_hash[32] = { 0, };
+    unsigned char pw_hash[32] = { 0, };
 
-    BIO *bp_public = NULL, *bp_private = NULL;
-    BIO *pub = NULL;
-    RSA *rsa_pubkey = NULL, *rsa_privkey = NULL;
+    // ECDH
+    BIO *bp_servPublicKey = NULL;      // for bio
+    BIO *bp_clntPublicKey = NULL;
+    EVP_PKEY *ecdh_servPrivateKey = generateKey();   // 서버는 하나의 키 쌍만 가짐
+    EVP_PKEY *ecdh_servPublicKey = extractPublicKey(ecdh_servPrivateKey);
+    EVP_PKEY *ecdh_clntPublicKey = NULL;
+    derivedKey* serverSecret = NULL;
+    unsigned char serverSecretKey[16];  // session key
+    int servPublicKey_len;
+
+    bp_servPublicKey = BIO_new(BIO_s_mem());
+    if (!bp_servPublicKey) {
+        error_handling("BIO_new(BIO_s_mem()) error");
+    }
+
+    if (PEM_write_bio_PUBKEY(bp_servPublicKey, ecdh_servPublicKey) != 1) {
+        error_handling("ECDH PEM_write_bio_PUBKEY() error");
+        BIO_free(bp_servPublicKey);
+        // abort();
+    }
+    servPublicKey_len = BIO_pending(bp_servPublicKey);
+
+    // BIO *bp_public = NULL, *bp_private = NULL;
+    // BIO *pub = NULL;
+    // RSA *rsa_pubkey = NULL, *rsa_privkey = NULL;
 
     pid_t pid;
     struct sigaction act;
@@ -100,8 +121,8 @@ int main(int argc, char* argv[])
 
     DIR *dir;
     struct dirent *ent;
-    
-    
+
+
     if (argc != 2)
     {
         fprintf(stderr, "%s <port>\n", argv[0]);
@@ -119,8 +140,6 @@ int main(int argc, char* argv[])
     act.sa_flags = 0;
     state = sigaction(SIGCHLD, &act, 0);
 
-    rsaes_generator(); // RSAES 공개키 개인키 생성
-
     serv_sock = socket(PF_INET, SOCK_STREAM, 0);
     if (serv_sock == -1)
     {
@@ -128,9 +147,9 @@ int main(int argc, char* argv[])
     }
 
     memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET; 
+    serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    serv_addr.sin_port = htons(atoi(argv[1])); 
+    serv_addr.sin_port = htons(atoi(argv[1]));
 
     if (bind(serv_sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) == -1)
     {
@@ -141,7 +160,7 @@ int main(int argc, char* argv[])
     {
         error_handling("listen() error");
     }
-    
+
 
     while (1)
     {
@@ -157,94 +176,7 @@ int main(int argc, char* argv[])
             printf("New client connected\n");
         }
 
-        // 공개키 읽기
-        bp_public = BIO_new_file("./serversavedata/public.pem", "r");
-        if (!PEM_read_bio_RSAPublicKey(bp_public, &rsa_pubkey, NULL, NULL)) // 공개키 정보 저장
-        {
-            goto err;
-        }
-        // 개인키 읽기
-        bp_private = BIO_new_file("./serversavedata/private.pem", "r");
-        if (!PEM_read_bio_RSAPrivateKey(bp_private, &rsa_privkey, NULL, NULL)) // 개인키 정보 저장
-        {
-            goto err;
-        }
-        // 클라이언트로부터의 공개키 요청 메시지를 수신
-        memset(&msg_in, 0, sizeof(APP_MSG));
-        n = readn(clnt_sock, &msg_in, sizeof(APP_MSG));
-        msg_in.type = ntohl(msg_in.type);
-        msg_in.msg_len = ntohl(msg_in.msg_len); // 공개키 요청 수신
-        if (n == -1)
-        {
-            error_handling("readn() error");
-        }
-        else if (n == 0)
-        {
-            error_handling("reading EOF");
-        }
-        ///////////////////////////////////////////////////
 
-        if (msg_in.type != PUBLIC_KEY_REQUEST)
-        {
-            error_handling("message error 1");
-        }
-        else
-        {
-            // 공개키를 메시지에 적재하여 클라이언트로 전송
-            // 공개키 보내기위한 준비 과정
-            memset(&msg_out, 0, sizeof(APP_MSG));
-            msg_out.type = PUBLIC_KEY;
-            msg_out.type = htonl(msg_out.type);
-            // 공개키를 읽어 전송
-            pub = BIO_new(BIO_s_mem()); 
-            PEM_write_bio_RSAPublicKey(pub, rsa_pubkey); 
-            publickey_len = BIO_pending(pub); 
-
-            BIO_read(pub, msg_out.payload, publickey_len); 
-            msg_out.msg_len = publickey_len;
-            msg_out.msg_len = htonl(msg_out.msg_len);
-            
-
-            n = writen(clnt_sock, &msg_out, sizeof(APP_MSG)); // 공개키 전송
-            if (n == -1)
-            {
-                error_handling("writen() error");
-                break;
-            }
-        }
-
-        // 클라이언트로부터의 암호화된 세션키 수신, 복호화하여 세션키 복원
-        memset(&msg_in, 0, sizeof(APP_MSG));
-        n = readn(clnt_sock, &msg_in, sizeof(APP_MSG));
-        msg_in.type = ntohl(msg_in.type);
-        msg_in.msg_len = ntohl(msg_in.msg_len);
-
-        if (msg_in.type != ENCRYPTED_KEY)
-        {
-            error_handling("message error 2");
-        } 
-        else
-        {
-            encryptedkey_len = RSA_private_decrypt(msg_in.msg_len, msg_in.payload, buffer, rsa_privkey, RSA_PKCS1_OAEP_PADDING); // 페이로드에 있는 데이터를 복호화해 버퍼에 복호화된 키가 들어감
-            memcpy(key, buffer, encryptedkey_len); // 버퍼에 있는 키를 key변수에 옮긴다
-        }
-        
-        // 서버로 전송된 복호화된 키 출력
-        printf("session key = ");
-        for (int i = 0; i < AES_KEY_128; i++)
-        {
-            printf("%02X ", key[i]);
-        }
-        printf("\n");
-        //////////////////////////////////////////////////////////////////////////
-        if (clnt_sock == -1)
-        {
-            continue;
-        }
-        else
-        {
-            printf("New client connected\n");
-        }
         // 자식 프로세스 생성
         pid = fork();
         // 자식 프로세스가 하는 작동
@@ -252,8 +184,67 @@ int main(int argc, char* argv[])
         {
             close(serv_sock); // 서버 소켓 필요없으므로 제거
 
+
+            // 클라이언트로부터의 공개키 요청 메시지를 수신 + 클라이언트의 공개 키 수신
+            memset(&msg_in, 0, sizeof(APP_MSG));
+            n = readn(clnt_sock, &msg_in, sizeof(APP_MSG));
+            msg_in.type = ntohl(msg_in.type);
+            msg_in.msg_len = ntohl(msg_in.msg_len); // 공개키 요청 수신
+            if (n == -1)
+            {
+                error_handling("readn() error");
+            }
+            else if (n == 0)
+            {
+                error_handling("reading EOF");
+            }
+            ///////////////////////////////////////////////////
+
+            if (msg_in.type != PUBLIC_KEY_REQUEST)
+            {
+                error_handling("client first message must be PUBLIC_KEY_REQUEST");
+            }
+            else
+            {   // read client's public key
+                bp_clntPublicKey = BIO_new_mem_buf(msg_in.payload, msg_in.msg_len);
+                if (!bp_clntPublicKey) {
+                    error_handling("BIO_new_mem_buf() error");
+                }
+
+                ecdh_clntPublicKey = PEM_read_bio_PUBKEY(bp_clntPublicKey, NULL, NULL, NULL);
+                if (!ecdh_clntPublicKey) {
+                    error_handling("PEM_read_bio_PUBKEY() error");
+                    BIO_free(bp_clntPublicKey);
+                }
+
+                //! debug
+                serverSecret = deriveShared(ecdh_clntPublicKey, ecdh_servPrivateKey);
+                // ECDH shared key
+                memcpy(serverSecretKey, serverSecret->secret, 16);
+                for (int cnt = 0; cnt < 16; cnt++) {
+                    printf("%02X ", serverSecretKey[cnt]);
+                    key[cnt] = serverSecretKey[cnt];
+                } printf("\n");
+
+                // set-up process for send public key to client
+                memset(&msg_out, 0, sizeof(msg_out));
+                msg_out.type = PUBLIC_KEY;
+                msg_out.type = htonl(msg_out.type);
+
+                // already packed
+
+                BIO_read(bp_servPublicKey, msg_out.payload, servPublicKey_len);
+                msg_out.msg_len = ntohl(servPublicKey_len);
+                n = writen(clnt_sock, &msg_out, sizeof(APP_MSG));
+                if (n == -1) {
+                    error_handling("writen() error");
+                }
+
+            }
+
+
             // 클라이언트 로그인 과정 메시지 수신 및 기능
-            while(msg_type != LOGIN_SUCCESS)
+            while (msg_type != LOGIN_SUCCESS)
             {
                 int n = 0;
                 int pt_id_len = 0;
@@ -268,7 +259,7 @@ int main(int argc, char* argv[])
                 }
                 else if (n == 0)
                     break;
-                
+
                 n = readn(clnt_sock, &pw, sizeof(APP_MSG));
                 if (n == -1)
                 {
@@ -296,7 +287,7 @@ int main(int argc, char* argv[])
 
                 pt_id_len = _decrypt(id.payload, id.msg_len, key, iv, (unsigned char *)recv_id);
                 pt_pw_len = _decrypt(pw.payload, pw.msg_len, key, iv, (unsigned char *)recv_pw);
-                
+
                 // 전송된 데이터 인증을 위핸 SHA-256 태그 생성
                 M_SHA256(id.payload, pt_id_len, hash1);
                 M_SHA256(pw.payload, pt_pw_len, hash2);
@@ -360,17 +351,17 @@ int main(int argc, char* argv[])
             }
             //////////////////////////////////////////////////////////////
             printf("Login ------------------------------------------\n");
-            
+
             msg_type = WAIT;
             // 명령어 메시지 수신
             while (msg_type != QUIT)
             {
                 int fd = -1;
                 char *save_name = NULL;
-                char file_name1[20] = {0, };
-                char dec_file_name1[20] = {0, };
-                char file_name2[20] = {0, };
-                char dec_file_name2[20] = {0, };
+                char file_name1[20] = { 0, };
+                char dec_file_name1[20] = { 0, };
+                char file_name2[20] = { 0, };
+                char dec_file_name2[20] = { 0, };
                 char buf[BUFSIZE];
                 int file_len = 0;
                 // 명령어 메시지 수신
@@ -397,13 +388,13 @@ int main(int argc, char* argv[])
                         break;
                     }
                     save_name = (char*)calloc(ciphertext_len, 1);
-                    
+
                     for (int i = 0; i < ciphertext_len; i++)
                         save_name[i] = file_name2[i];
 
                     len = strlen(down_dir);
                     for (int i = 0; i < len; i++)
-                        down_dir[len+i] = save_name[i];
+                        down_dir[len + i] = save_name[i];
 
                     // 클라이언트가 원하는 파일이름으로 생성
                     fd = open(down_dir, O_CREAT | O_WRONLY | O_TRUNC, S_IRWXU);
@@ -445,8 +436,8 @@ int main(int argc, char* argv[])
                             msg_type = WAIT;
                             break;
                         }
-                        
-                    }       
+
+                    }
                     break;
                 case DOWN: // 서버의 파일을 클라이언트가 다운로드, 실행파일, C파일이 존재하는 폴더에 있는 파일만 다운로드 가능
                     for (int i = down_dir_len; i < sizeof(down_dir); i++)
@@ -477,7 +468,7 @@ int main(int argc, char* argv[])
 
                     len = strlen(down_dir);
                     for (int i = 0; i < len; i++)
-                        down_dir[len+i] = save_name[i];
+                        down_dir[len + i] = save_name[i];
 
                     // 파일 존재 여부 확인
                     fd = open(down_dir, O_RDONLY, S_IRWXU);
@@ -497,7 +488,7 @@ int main(int argc, char* argv[])
                         msg_out.type = htonl(EX_FILE);
                         writen(clnt_sock, &msg_out, sizeof(APP_MSG));
                     }
- 
+
                     // 파일 내용 보내기
                     while (1)
                     {
@@ -554,7 +545,7 @@ int main(int argc, char* argv[])
                             writen(clnt_sock, &msg_out, sizeof(APP_MSG));
                             writen(clnt_sock, hash1, sizeof(hash1));
                         }
-                        
+
                         closedir(dir);
                     }
                     else
@@ -590,66 +581,11 @@ err:
     return 0;
 }
 
-static int _pad_unknopwn(void)
-{
-    unsigned long l;
-
-    while ((l = ERR_get_error()) != 0)
-    {
-        if (ERR_GET_REASON(l) == RSA_R_UNKNOWN_PADDING_TYPE)
-            return (1);    
-    }
-    return (0);
-}
-
-int rsaes_generator()
-{
-    int ret = 1;
-    RSA *rsa; // rsa 구조체 포인터
-    int num;
-    BIO *bp_public = NULL, *bp_private = NULL; // BIO : 파일 포인터 역할, 생성한 공개키 쌍을 좀더 편리하게 파일 형태로 저장하기 위해 openssl에서 제공하는 유틸리티
-    unsigned long e_value = RSA_F4;
-    BIGNUM *exponent_e = BN_new(); // 큰 정수 라이브러리, 자료형
-
-    rsa = RSA_new(); // rsa 구조체 공간 할당
-
-    BN_set_word(exponent_e, e_value); // exponent_e bignum 자료형에 e_value 를 큰정수 형태로 만들어 놓는것 , 큰정수 구조체에  값을 설정하는
-
-    if (RSA_generate_key_ex(rsa, 2048, exponent_e, NULL) == '\0') // 2048 비트짜리 키 생성 빅넘버 구조체에 넣는다 // 키 쌍 생성
-    {
-        fprintf(stderr, "RSA_generate_key_ex() error\n");
-    }
-
-    bp_public = BIO_new_file("./serversavedata/public.pem", "w+");
-    ret = PEM_write_bio_RSAPublicKey(bp_public, rsa); // 공개키 저장
-
-    if (ret != 1)
-    {
-        goto err;
-    }
-
-    bp_private = BIO_new_file("./serversavedata/private.pem", "w+");
-    ret = PEM_write_bio_RSAPrivateKey(bp_private, rsa, NULL, NULL, 0, NULL, NULL); // 비밀키 저장
-
-    if (ret != 1)
-    {
-        goto err;
-    }
-
-err:
-    // 자원 반납
-    RSA_free(rsa);
-    BIO_free_all(bp_public);
-    BIO_free_all(bp_private);
-
-    return ret;
-}
-
 // ID/PW 확인 함수
 int check_user(char *id, char *pw)
 {
     FILE *fp = fopen("./serversavedata/user.txt", "r");
-    char buf[IDPW_SIZE] = {0,};
+    char buf[IDPW_SIZE] = { 0, };
     char *idpw_buf = NULL;
     int n = 0;
 
@@ -691,14 +627,14 @@ int check_user(char *id, char *pw)
 void enrollment_user(char *id, char *pw)
 {
     FILE *fp = fopen("./serversavedata/user.txt", "a+");
-    
+
     fprintf(fp, "%s", id);
     fprintf(fp, " : ");
     fprintf(fp, "%s", pw);
     fprintf(fp, "\n");
-    
+
     fclose(fp);
-    
+
 }
 void read_childproc(int sig) // 운영체제가 직접적으로 자식프로세스가 종료됬을때 호출해준다.
 {

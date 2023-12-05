@@ -1,9 +1,4 @@
-Following McConnell's statement, Vice President-elect Harris graciously accepted his congratulations -- in a way that appeared designed to open up an avenue for cooperation when Washington gears up after the holidays.
-Much will still depend on the Georgia races, that could hand Harris, as president of the Senate, the crucial deciding voice in tied votes in a 50-50 Senate should both Democratic candidates prevail.
-"I think it's critically important. I applaud Mitch McConnell for talking to Joe Biden today," Harris said in an interview with ABC's "Good Morning America" set to air on Wednesday.
-"You know it would have been better if it were earlier, but it happened and that's what's most important. So let's move forward, let's move forward and where we can find common purpose and common ground let's do that. Let's have that be our priority."
-Many Democrats, who watched McConnell's hardball play to deny President Barack Obama his Supreme Court nominee Merrick Garland and who have seen the majority leader relentlessly fill the courts with conservative judges, think any notion of cooperation harbored by Biden are fanciful.
-But during the Obama administration, then-Vice President Biden was often tasked by the President with leading negotiations with McConnell. The Kentucky Republican and Obama did not try to hide their antipathy for one another. McConnell said he respected Biden because he understood the limits of his positions, and did not try to change his ideology, making compromise easier.
-McConnell also wrote endearingly of the President-elect in his autobiography, "The Long Game," poking fun at Biden's garrulous reputation.
-"As my dad would have said about the Vice President if they'd ever met: if you ask him what time it is, he'll tell you how to make a watch," McConnell said.
-If that sense of good humor and willingness to seek limited, bipartisan deals survives the first few months of a new presidency likely to face blanket Republican opposition, it will be a miracle.
+Elliptic-curve Diffie–Hellman (ECDH) is a key agreement protocol that allows two parties, each having an elliptic-curve public–private key pair, to establish a shared secret over an insecure channel.
+[1][2][3] This shared secret may be directly used as a key, or to derive another key. 
+The key, or the derived key, can then be used to encrypt subsequent communications using a symmetric-key cipher. 
+It is a variant of the Diffie–Hellman protocol using elliptic-curve cryptography.
